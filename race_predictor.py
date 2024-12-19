@@ -186,7 +186,6 @@ def enhance_features(data, historical_data=None):
         
         if historical_data is not None:
             print(f"\n処理対象レース種別: {processed_data['種別'].iloc[0]}")
-            print(f"使用するデータ数: {len(historical_data)}行")
             
             # 馬の過去成績を計算
             horse_stats = calculate_horse_stats(historical_data)
@@ -208,6 +207,12 @@ def enhance_features(data, historical_data=None):
             
             # コース適性、距離適性、馬場適性を計算
             for feature in ['場名', '距離', '馬場']:
+                # データ型を事前に統一
+                if feature == '距離':
+                    # 距離を数値型に変換
+                    historical_data[feature] = pd.to_numeric(historical_data[feature].astype(str).replace(r'[^\d.]', '', regex=True), errors='coerce')
+                    processed_data[feature] = pd.to_numeric(processed_data[feature].astype(str).replace(r'[^\d.]', '', regex=True), errors='coerce')
+                
                 # 平均着順を計算
                 feature_rank = historical_data.groupby(['馬名', feature])['着順'].mean().reset_index()
                 feature_rank.columns = ['馬名', feature, f'{feature}_平均着順']
@@ -219,16 +224,15 @@ def enhance_features(data, historical_data=None):
                 # 統計を結合
                 feature_stats = feature_rank.merge(feature_count, on=['馬名', feature])
                 
-                # 適性を計算（平均着順の逆数 × レース数の対数）
+                # 適性を計算
                 feature_stats[f'{feature}_適性'] = 1 / (feature_stats[f'{feature}_平均着順'] * 
                                                     np.log1p(feature_stats[f'{feature}_レース数']))
                 
-                # 数値型の列のみデータ型を統一
-                if feature == '距離':  # 距離のみ数値型に変換
+                # 新しいデータに結合（データ型を明示的に指定）
+                if feature == '距離':
                     feature_stats['距離'] = feature_stats['距離'].astype(float)
                     processed_data['距離'] = processed_data['距離'].astype(float)
                 
-                # 新しいデータに結合
                 processed_data = processed_data.merge(
                     feature_stats[['馬名', feature, f'{feature}_適性']], 
                     on=['馬名', feature], 
@@ -253,19 +257,18 @@ def enhance_features(data, historical_data=None):
                 if processed_data[col].isna().any():
                     processed_data[col] = processed_data[col].fillna(processed_data[col].mean())
             
-            # 前走の距離を取得
+            # 前走の距離を取得と距離変化の計算
             processed_data['前走距離'] = historical_data['距離'].shift(1)
-            
-            # 距離の変化を特徴量として追加
-            processed_data['距離変化'] = np.where(
-                processed_data['距離'] > processed_data['前走距離'], '延長',
-                np.where(processed_data['距離'] < processed_data['前走距離'], '短縮', '同じ')
+            processed_data['距離変化'] = processed_data.apply(
+                lambda x: '延長' if x['距離'] > x['前走距離'] else ('短縮' if x['距離'] < x['前走距離'] else '同じ'),
+                axis=1
             )
         
         return processed_data
         
     except Exception as e:
         print(f"特徴量生成中にエラーが発生: {str(e)}")
+        traceback.print_exc()
         raise
 
 def improve_preprocessing(df, is_new_race=False):
@@ -374,7 +377,7 @@ def load_and_prepare_data(directory_path):
                 df = pd.read_csv(file, usecols=usecols)
                 dfs.append(df)
             except Exception as e:
-                print(f"警告: {os.path.basename(file)} の読み込みに失敗しました")
+                print(f"警告: {os.path.basename(file)} の読込みに失敗しました")
                 continue
         
         if not dfs:
@@ -406,7 +409,7 @@ def load_and_prepare_data(directory_path):
         df = df[df['着順'] != 99]  # 失格、中止などを除外
         df = df.dropna(subset=['着順'])  # 着順のNaNを除外
         
-        # 特徴量の生成（種別ごとに分けて処理）
+        # 特徴量の生成（種別とに分けて処理）
         df_turf = df[df['種別'] == '芝'].copy()
         df_dirt = df[df['種別'] == 'ダート'].copy()
         
@@ -470,7 +473,7 @@ def train_advanced_model(X, y):
         '前走上り': 0.7,
         '前走着差': 0.7,
         '前々走着順': 0.5,
-        '前々走タイム': 0.5,
+        '前々走イム': 0.5,
         '前々走上り': 0.5,
         '前々走着差': 0.5,
         '平均着順': 0.4,
@@ -480,7 +483,7 @@ def train_advanced_model(X, y):
         '距離適性': 0.9,
         '馬場適性': 0.7,
         '距離変化': 0.6,  # 新たに追加した特徴量の重み
-        # 他の特徴量も必要に応じて追加
+        # の特徴量も必要に応じて追加
     }
     
     # LightGBMモデル
@@ -576,7 +579,7 @@ def train_advanced_model(X, y):
     return best_models, scaler, X_test_scaled, y_test, feature_importance
 
 def validate_model(X, y, model):
-    """時系列クロスバリデーションを実装する関数"""
+    """時系列ロスバリデーションを実装する関数"""
     tscv = TimeSeriesSplit(n_splits=5)
     scores = []
     
@@ -594,49 +597,69 @@ def validate_model(X, y, model):
 def predict_new_race(model, scaler, new_race_data, training_data, model_name):
     """新しいレースの予測を行う関数"""
     try:
-        # データの前処理
+        # 重複行の削除（完全な重複のみ）
+        new_race_data = new_race_data.drop_duplicates(subset=['馬名'], keep='first')
+        
+        # 必須カラムの存在確認と欠損値���処理
+        required_columns = ['馬名', '馬番', '騎手', '馬体重', '増減']
+        for col in required_columns:
+            if col not in new_race_data.columns:
+                raise ValueError(f"必要なカラム '{col}' が不足しています")
+            
+            # 数値型カラムの欠損値を0で補完
+            if col in ['馬体重', '増減', '馬番']:
+                new_race_data[col] = pd.to_numeric(new_race_data[col], errors='coerce').fillna(0)
+            # 文字列型カラムの欠損値を'不明'で補完
+            elif col == '騎手':
+                new_race_data[col] = new_race_data[col].fillna('不明')
+        
         processed_data = enhance_features(new_race_data, training_data)
-        
-        # 必要な特徴量のリスト
         required_features = create_race_features(processed_data)
-        
-        # 特徴量の選択
         X_new = processed_data[required_features].copy()
-        
-        # 欠損値の処理
         X_new = X_new.fillna(X_new.mean())
-        
-        # スケーリング
         X_new_scaled = scaler.transform(X_new)
-        
-        # 予測
         predictions = model.predict(X_new_scaled)
-        
-        # 予測値のスケール調整
         predictions = np.clip(predictions, 1, 18)
         
-        # 結果をデータフレームにまとめる
+        # 結果をデータフレームに格納
         results = pd.DataFrame({
-            '馬名': processed_data['馬名'],
+            '馬名': new_race_data['馬名'],
             '予測着順': predictions,
-            '枠番': processed_data['枠番'],
-            '馬番': processed_data['馬番'],
-            '騎手': processed_data['騎手'],
-            '馬体重': processed_data['馬体重'],
-            '増減': processed_data['増減']
+            '馬番': new_race_data['馬番'],
+            '騎手': new_race_data['騎手'],
+            '馬体重': new_race_data['馬体重'],
+            '増減': new_race_data['増減']
         })
         
-        # 着順で並び替え
+        # 数値型カラムの安全な変換
+        for col in ['馬体重', '増減', '馬番']:
+            results[col] = pd.to_numeric(results[col], errors='coerce').fillna(0).astype(float)
+        
         results = results.sort_values('予測着順')
         results['予測着順'] = results['予測着順'].round(1)
         results.index = range(1, len(results) + 1)
         
-        return results
+        return results, predictions
         
     except Exception as e:
         print(f"\n=== {model_name}モデルでエラーが発生しました ===")
         print(f"エラー内容: {str(e)}")
         raise
+
+def ensemble_predictions(predictions_dict, weights=None):
+    """アンサンブル学習の結果を計算する関数"""
+    if weights is None:
+        weights = {
+            'LightGBM': 0.4,
+            'XGBoost': 0.35,
+            'RandomForest': 0.25
+        }
+    
+    weighted_predictions = np.zeros_like(list(predictions_dict.values())[0])
+    for model_name, predictions in predictions_dict.items():
+        weighted_predictions += predictions * weights[model_name]
+    
+    return weighted_predictions
 
 def debug_csv_contents(file_path):
     """CSVファイルの内容を確認するための関数"""
@@ -646,7 +669,7 @@ def debug_csv_contents(file_path):
             print(f"ファイルが見つかりません: {file_path}")
             return
         
-        # CSVファイルの内容を確認
+        # CSVファイルの内容を確
         df = pd.read_csv(file_path)
         print("\nCSVファイルの情報:")
         print(f"列名: {df.columns.tolist()}")
@@ -657,54 +680,141 @@ def debug_csv_contents(file_path):
     except Exception as e:
         print(f"CSVファイル確認中にエラーが発生: {str(e)}")
 
+def format_race_results(results_df):
+    """レース結果を整形して表示する関数"""
+    try:
+        def str_width(s):
+            """文字列の表示幅を計算（全角2、半角1として計算）"""
+            width = 0
+            for c in str(s):
+                if ord(c) < 128:  # ASCII文字（半角）
+                    width += 1
+                else:  # その他（全角と仮定）
+                    width += 2
+            return width
+
+        def pad_string(s, width):
+            """文字列を指定した表示幅に調整（全角/半角を考慮）"""
+            current_width = str_width(s)
+            if current_width < width:
+                return s + ' ' * (width - current_width)
+            return s
+
+        # 馬名の最大幅を計算（最低20文字分は確保）
+        max_horse_name_width = max(
+            max(str_width(name) for name in results_df['馬名']),
+            20  # 最小幅（全角10文字分）
+        ) + 2  # 余白として2文字分追加
+        
+        # 列幅の設定（全角文字を考慮）
+        column_widths = {
+            '馬名': max_horse_name_width,
+            '予測着順': 10,   # 全角5文字分
+            '馬番': 8,       # 全角4文字分
+            '騎手': 20,      # 全角10文字分
+            '馬体重': 10,     # 全角5文字分
+            '増減': 8        # 全角4文字分
+        }
+        
+        # データの整形
+        formatted_df = results_df.copy()
+        formatted_df['予測着順'] = formatted_df['予測着順'].map('{:.1f}'.format)
+        
+        # 数値カラムの安全な変換とフォーマット
+        for col, fmt in [('馬体重', '{:.0f}'), ('増減', '{:+.0f}'), ('馬番', '{:.0f}')]:
+            formatted_df[col] = pd.to_numeric(formatted_df[col], errors='coerce').fillna(0)
+            formatted_df[col] = formatted_df[col].map(fmt.format)
+        
+        # ヘッダーの作成
+        header = "".join(pad_string(col, column_widths[col]) for col in column_widths.keys())
+        separator = "-" * str_width(header)
+        
+        # 各行のデータを整形
+        rows = []
+        for idx, row in formatted_df.iterrows():
+            formatted_row = "".join(
+                pad_string(str(row[col]), column_widths[col])
+                for col in column_widths.keys()
+            )
+            rows.append(f"{idx:2d}  {formatted_row}")
+        
+        # 結果を結合
+        return "\n".join([header, separator] + rows)
+        
+    except Exception as e:
+        print(f"フォーマット中にエラーが発生しました: {str(e)}")
+        raise
+
 def main():
     try:
-        print("データ読み込み中...")
         directory_path = os.path.join(os.path.dirname(__file__), "data", "training")
         X, y, df = load_and_prepare_data(directory_path)
-        
-        print("\nモデル学習中...")
         best_models, scaler, X_test_scaled, y_test, feature_importance = train_advanced_model(X, y)
         
-        # 新しいレースデータの読み込み
         new_race_file = "data/prediction/new_race.csv"
         try:
+            # 新しいレースデータの読み込み
             new_race_data = pd.read_csv(new_race_file)
-            print("\nCSVファイルの情報:")
-            print(f"列名: {new_race_data.columns.tolist()}")
-            print("\n最初の数行:")
-            print(new_race_data.head())
-            print(f"\n行数: {len(new_race_data)}")
             
-            # 新しいレースデータの前処理
+            # 必須カラムの確認
+            required_columns = ['馬名', '馬番', '騎手', '馬体重', '増減']
+            missing_columns = [col for col in required_columns if col not in new_race_data.columns]
+            if missing_columns:
+                raise ValueError(f"予測用データに必要なカラムが不足しています: {missing_columns}")
+            
             new_race_data = improve_preprocessing(new_race_data, is_new_race=True)
             
-            print("\n新しいレースの予測結果:")
+            print("\n" + "="*80)
+            print("各モデルの予測結果")
+            print("="*80)
+            
+            predictions_dict = {}
             for model_name, model in best_models.items():
-                try:
-                    results = predict_new_race(
-                        model=model,
-                        scaler=scaler,
-                        new_race_data=new_race_data,
-                        training_data=df,
-                        model_name=model_name
-                    )
-                    print(f"\n{model_name}モデルの予測:")
-                    print(results.to_string())
-                    print("\n" + "="*50)
-                except Exception as e:
-                    print(f"\n{model_name}モデルでエラーが発生しました: {str(e)}")
-                    continue
+                results, predictions = predict_new_race(
+                    model=model,
+                    scaler=scaler,
+                    new_race_data=new_race_data,
+                    training_data=df,
+                    model_name=model_name
+                )
+                predictions_dict[model_name] = predictions
                 
+                print(f"\n【{model_name}の予測】")
+                print("-"*80)
+                formatted_results = results[['馬名', '予測着順', '馬番', '騎手', '馬体重', '増減']].copy()
+                print(format_race_results(formatted_results))
+            
+            # アンサンブル学習の結果を計算
+            ensemble_preds = ensemble_predictions(predictions_dict)
+            
+            # アンサンブル結果をデータフレームに格納
+            ensemble_results = pd.DataFrame({
+                '馬名': new_race_data['馬名'],
+                '予測着順': ensemble_preds,
+                '馬番': new_race_data['馬番'],
+                '騎手': new_race_data['騎手'],
+                '馬体重': new_race_data['馬体重'],
+                '増減': new_race_data['増減']
+            })
+            
+            ensemble_results = ensemble_results.sort_values('予測着順')
+            ensemble_results.index = range(1, len(ensemble_results) + 1)
+            
+            print("\n" + "="*80)
+            print("最終予測（アンサンブル学習の結果）")
+            print("="*80)
+            
+            formatted_ensemble = ensemble_results[['馬名', '予測着順', '馬番', '騎手', '馬体重', '増減']].copy()
+            print(format_race_results(formatted_ensemble))
+            print("\n")
+            
         except FileNotFoundError:
             print(f"\nエラー: 予測用のファイル '{new_race_file}' が見つかりません。")
-        except Exception as e:
-            print(f"\n新しいレースデータの読み込み中にエラーが発生しました: {str(e)}")
+        except ValueError as ve:
+            print(f"\nエラー: {str(ve)}")
             
     except Exception as e:
         print(f"エラーが発生しました: {str(e)}")
-        print("\n新しいレースのCSVファイルの列名を確認してください。")
-        print("必要な列: 馬名, 枠番, 馬番, 性齢, 斤量, 騎手, 馬体重, 増減, 場名, 種別, 距離, 回り, 天候, 馬場")
 
 if __name__ == "__main__":
     main()
