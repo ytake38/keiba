@@ -236,14 +236,14 @@ class NetkeibaClient:
 
 def main():
     client = NetkeibaClient()
-    base_dir = Path("./data")
+    base_dir = Path("./data/training")
     base_dir.mkdir(exist_ok=True)
     
     # 2023年のデータを取得する
     all_date_ids = []
     print("カレンダーからレース開催日を取得中...")
-    for month in range(1, 13):
-        date_ids = client.get_calendar_dates(2023, month)
+    for month in range(12, 13):
+        date_ids = client.get_calendar_dates(2024, month)
         all_date_ids.extend(date_ids)
     
     total_dates = len(all_date_ids)
