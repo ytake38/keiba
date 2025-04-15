@@ -242,8 +242,8 @@ def main():
     # 2023年のデータを取得する
     all_date_ids = []
     print("カレンダーからレース開催日を取得中...")
-    for month in range(12, 13):
-        date_ids = client.get_calendar_dates(2024, month)
+    for month in range(1, 13):
+        date_ids = client.get_calendar_dates(2025, month)
         all_date_ids.extend(date_ids)
     
     total_dates = len(all_date_ids)
